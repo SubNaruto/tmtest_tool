@@ -20,8 +20,8 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 class RemoteSession {
-    Session session;
-    String absoluteSessionPath;
+    Session session;// 会话对象，管理与SSH服务器的连接以及处理来自服务器的消息
+    String absoluteSessionPath;// 部署集群时，多个服务器的dockerfiles的绝对地址一致
 
     RemoteSession(Session s, String str) {
         session = s;
@@ -40,7 +40,7 @@ public class userssh {
     @Autowired
     private UserMapper usermapper;
 
-
+    // 用于存储各个远端服务器中节点在部署集群时所需的一些配置信息
     public static String LocalFilePath = "/Users/duanjincheng/Desktop/tmtest_tool/configfile";
 
 
@@ -50,7 +50,7 @@ public class userssh {
             Map<Integer, RemoteSession> map = establishUserSessionMap(usermapper.findAll());
             System.out.println(map);
 
-            // 2.并行启动docker容器编排
+            // 2.并行启动docker容器编排，CountDownLatch是内部计数器，阻塞主线程
             CountDownLatch countDownLatch = new CountDownLatch(map.size());
             concurrentStartDocker(map, countDownLatch);
 
@@ -221,35 +221,40 @@ public class userssh {
 
         for (Users user : userlist) {
             String ip = user.getIp();// SSH地址
-            int port = user.getPort();
+            int port = user.getPort();// 令SSH端口为22
             String name = user.getName(); // SSH登录用户名
             String keyword = user.getKeyword(); // SSH登录密码
             JSch jsch = new JSch();
-            Session session = null; // 令SSH端口为22
+            Session session = null;
             try {
                 session = jsch.getSession(name, ip, port);
 
                 session.setPassword(keyword);// 设置密码
 
-                // 禁用StrictHostKeyChecking
+                // 禁用主机密钥检查 StrictHostKeyChecking
                 java.util.Properties config = new java.util.Properties();
-                config.put("StrictHostKeyChecking", "no");
+                // java.util.Properties用于管理属性集合；继承于java.util.Hashtable类，具有哈希表的特性，可以存储键值对
+                config.put("StrictHostKeyChecking", "no");// 添加键值对
                 session.setConfig(config);
 
                 session.connect();// 连接SSH服务器
 
+                // 创建用于执行命令的通道，所以将通道转换为ChannelExec类型
                 ChannelExec channelExec = (ChannelExec) session.openChannel("exec");
                 channelExec.setCommand("pwd");
                 channelExec.connect();
 
+                // 从ChannelExec获取输入流，用于从远程服务器读取执行命令的输出
                 InputStream in = channelExec.getInputStream();
                 byte[] buffer = new byte[1024];
                 StringBuilder stringBuilder = new StringBuilder();
                 int bytesRead;
+
+                // in.read(buffer)从输入流中读取数据，并将读取的字节存储到buffer数组
                 while ((bytesRead = in.read(buffer)) != -1) {
                     stringBuilder.append(new String(buffer, 0, bytesRead));
                 }
-                String remotePath = stringBuilder.toString().trim();
+                String remotePath = stringBuilder.toString().trim();  // trim()去除字符串两端空格
                 map.put(user.getId(), new RemoteSession(session, remotePath + "/duan_workspace"));
 
                 channelExec.disconnect();
@@ -272,7 +277,7 @@ public class userssh {
 
 
     /**
-     * 并行下载，当所有服务器节点的内容下载完毕之后，才开始整合
+     * 并行下载，当所有服务器节点的配置内容下载完毕之后，才开始整合
      **/
     public void concurrentDownload(Map<Integer, RemoteSession> userSessionMap, CountDownLatch countDownLatch) {
         if (userSessionMap == null || userSessionMap.isEmpty()) {
@@ -344,6 +349,7 @@ public class userssh {
         }
     }
 
+    // 递归下载远端服务器的文件夹所有内容到本机
     private void downloadFolder(ChannelSftp channelSftp, String localPath, String remotePath) {
         try {
             List<ChannelSftp.LsEntry> list = channelSftp.ls(remotePath);
@@ -361,6 +367,7 @@ public class userssh {
                     }
                 } else {
                     // 文件！
+                    // SFTP（SSH File Transfer Protocol）的get方法从远端服务器路径下拉取文件到本地路径
                     channelSftp.get(remoteRealPath, localRealPath);
                 }
             }
@@ -396,7 +403,7 @@ public class userssh {
                 } else {
                     JsonObject extraJsonObject = parser.parse(new FileReader(s)).getAsJsonObject();
                     JsonArray extraValidators = extraJsonObject.getAsJsonArray("validators");
-                    firstValidators.addAll(extraValidators);
+                    firstValidators.addAll(extraValidators);// 在第一个节点的验证方里，添加其他节点为验证方
                 }
                 System.out.println(firstJsonObject.toString());
             } catch (Exception e) {
@@ -463,7 +470,7 @@ public class userssh {
 
     private void uploadFolder(ChannelSftp channelSftp, String localPath, String remotePath) throws FileNotFoundException {
         List<String> localJsonsPath = new ArrayList<>();
-        findChildFile(localJsonsPath, localPath);
+        findChildFile(localJsonsPath, localPath);// 获取本地路径下的所有json文件路径
         List<String> remoteJsonPath = new ArrayList<>(localJsonsPath);
 
         // 远端json路径更新
@@ -474,6 +481,8 @@ public class userssh {
 
         try {
             for (int i = 0; i < localJsonsPath.size(); i++) {
+
+                // SFTP（SSH File Transfer Protocol）的put方法把本地路径下文件推到远端服务器上
                 channelSftp.put(localJsonsPath.get(i), remoteJsonPath.get(i));
             }
         } catch (SftpException e) {
