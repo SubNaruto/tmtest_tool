@@ -1,0 +1,87 @@
+services:
+    node1:
+        image: tm
+        container_name: node1
+        ports:
+            - "16657:26657"
+            - "16656:26656"
+        volumes:
+             - $HOME/dockerfiles/node1:/root/.tendermint
+        user: root
+        networks:
+            dennis_mynet:
+               ipv4_address: 172.18.0.2  
+        command:
+            - /usr/bin/bash
+            - -c
+            - |
+                ./tendermint init
+                chmod 777 -R /root/.tendermint
+                ./tendermint show-node-id > /root/.tendermint/nodeid.txt
+                tail -f /dev/null
+    node2:
+        image: tm
+        container_name: node2
+        ports:
+            - "26657:26657"
+            - "26656:26656"
+        volumes:
+             - $HOME/dockerfiles/node2:/root/.tendermint
+        user: root
+        networks:
+            dennis_mynet:
+                ipv4_address: 172.18.0.3    
+        command:
+            - /usr/bin/bash
+            - -c
+            - |
+                ./tendermint init
+                chmod 777 -R /root/.tendermint
+                ./tendermint show-node-id > /root/.tendermint/nodeid.txt
+                tail -f /dev/null
+    node3:
+        image: tm
+        container_name: node3
+        ports:
+            - "36657:26657"
+            - "36656:26656"
+        volumes:
+             - $HOME/dockerfiles/node3:/root/.tendermint
+        user: root
+        networks:
+            dennis_mynet:
+                ipv4_address: 172.18.0.4     
+        command:
+            - /usr/bin/bash
+            - -c
+            - |
+                ./tendermint init
+                chmod 777 -R /root/.tendermint
+                ./tendermint show-node-id > /root/.tendermint/nodeid.txt
+                tail -f /dev/null
+    node4:
+        image: tm
+        container_name: node4
+        ports:
+            - "46657:26657"
+            - "46656:26656"
+        volumes:
+             - $HOME/dockerfiles/node4:/root/.tendermint
+        user: root
+        networks:
+             dennis_mynet:
+                 ipv4_address: 172.18.0.5     
+        command:
+            - /usr/bin/bash
+            - -c
+            - |
+                ./tendermint init
+                chmod 777 -R /root/.tendermint
+                ./tendermint show-node-id > /root/.tendermint/nodeid.txt
+                tail -f /dev/null
+networks:
+    dennis_mynet:
+        ipam:
+            driver: default
+            config:
+                - subnet: 172.18.0.0/16

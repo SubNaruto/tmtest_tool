@@ -9,7 +9,6 @@ public class Users {
     private String ip;
     private String keyword;
     private Integer nodenum;
-
     private Integer port;
 
     public Integer getId() {

@@ -16,7 +16,7 @@ public class TmTestApplication {
         StartController startController = context.getBean(StartController.class);
 
         // 调用StartController实例的start()方法
-        startController.start();
+        //startController.start();
     }
 
 }

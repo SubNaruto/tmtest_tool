@@ -8,31 +8,15 @@ import com.google.gson.JsonParser;
 import com.jcraft.jsch.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.yaml.snakeyaml.Yaml;
+
 
 import java.io.*;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-
-class RemoteSession {
-    Session session;// 会话对象，管理与SSH服务器的连接以及处理来自服务器的消息
-    String absoluteSessionPath;// 部署集群时，多个服务器的dockerfiles的绝对地址一致
-
-    RemoteSession(Session s, String str) {
-        session = s;
-        absoluteSessionPath = str;
-    }
-
-    @Override
-    public String toString() {
-        return "{" + session.getUserName() + "," + session.getUserInfo() + "," + absoluteSessionPath + "}";
-    }
-}
 
 @Component
 public class userssh {
@@ -40,110 +24,108 @@ public class userssh {
     @Autowired
     private UserMapper usermapper;
 
+    // sessionid -> map(container_name -> TNodeInfo)
+
+    private Map<Integer, Map<String, TNodeInfo>> tendermintMap = new HashMap<>();
+
     // 用于存储各个远端服务器中节点在部署集群时所需的一些配置信息
+    public static String RemoteWorkSpace = "dockerfiles";
     public static String LocalFilePath = "/Users/duanjincheng/Desktop/tmtest_tool/configfile";
 
 
     public void establishSSH() {
         try {
-            // 1.启动所有session，建立索引, userid -> session
+
+
+            // 0.启动所有session，建立索引, userid -> session
             Map<Integer, RemoteSession> map = establishUserSessionMap(usermapper.findAll());
             System.out.println(map);
+
+            // 1.准备工作，运行测试工具jmeter等
+            preparationWork(map);
 
             // 2.并行启动docker容器编排，CountDownLatch是内部计数器，阻塞主线程
             CountDownLatch countDownLatch = new CountDownLatch(map.size());
             concurrentStartDocker(map, countDownLatch);
+            countDownLatch.await();
 
             // 3.主线程阻塞，并行下载
             countDownLatch = new CountDownLatch(map.size());
             concurrentDownload(map, countDownLatch);
+            countDownLatch.await();
 
             //4.主线程放开，开始整合
-            countDownLatch.await();
             configUnify(map);
 
             //5.主线程阻塞，并行上传
             countDownLatch = new CountDownLatch(map.size());
             concurrentUpload(map, countDownLatch);
+            countDownLatch.await();
 
             // 6.并行每个session的每个docker节点运行tendermint
             countDownLatch = new CountDownLatch(map.size());
             concurrentTendermintForSession(map, countDownLatch);
-
-            //0.主线程放开，清理资源！
             countDownLatch.await();
+
+            //7.主线程放开，清理资源！x
             onDestroySession(map);
         } catch (Exception e) {
             e.printStackTrace(); // 打印异常信息
         }
     }
 
-    /**
-     * docker节点启动tendermint，部署集群
-     *
-     * @param countDownLatch
-     */
-    private void concurrentTendermintForSession(Map<Integer, RemoteSession> userSessionMap, CountDownLatch countDownLatch) {
-        if (userSessionMap == null || userSessionMap.isEmpty()) {
-            return;
-        }
-        System.out.println("启动tendermint开始");
-        ThreadPoolExecutor startDockerThreadPoolExecutor = generateThreadPoolExecutor();
-
-        for (Map.Entry<Integer, RemoteSession> entry : userSessionMap.entrySet()) {
+    private void preparationWork(Map<Integer, RemoteSession> map) {
+        ThreadPoolExecutor threadPoolExecutor = generateThreadPoolExecutor();
+        for (Map.Entry<Integer, RemoteSession> entry : map.entrySet()) {
             if (entry == null) {
                 continue;
             }
-            startDockerThreadPoolExecutor.execute(new Runnable() {
+            threadPoolExecutor.execute(new Runnable() {
                 @Override
                 public void run() {
                     RemoteSession remoteSession = entry.getValue();
-                    startTendermint(remoteSession.session);
-                    countDownLatch.countDown();
+                    Session session = remoteSession.session;
+                    startJMeter(session);
                 }
             });
-
         }
-        System.out.println("启动tendermint结束");
     }
 
-    /**
-     * 启动tendermint
-     *
-     * @param session
-     */
-    private void startTendermint(Session session) {
+    private void startJMeter(Session session) {
         if (session == null) {
             return;
         }
-        //todo order组装
-        // 1.container id
-        // 2.node id
-        // 3.yml中的ip地址
-        String containerID = "";
-        List<String> nodeId = new ArrayList<>();
-        List<String> nodeIp = new ArrayList<>();
-        List<String> nodePort = new ArrayList<>();
-
-        int nodeCount = nodeId.size();
-        String tendermintOrder = "nohup ./tendermint node " +
-                "--p2p.persistent_peers=\"85ba184d2cfbea97c75c98abeae23cd967af43ea@172.18.0.2:16656" +
-                ",6ca9a848ca9fc4d2f0dcebefbc58d902f39dc701@172.18.0.3:26656" +
-                ",28715b4f83db63885bb7ffdc0ba15fe21bf2f31d@172.18.0.4:36656" +
-                ",05a02132b0d89f788b318f13e259e24544a30b25@172.18.0.5:46656\" &";
-        String finalOrder = "docker exec -it" + containerID + " /bin/bash -c " + tendermintOrder;
         try {
+            System.out.println("执行JMeter");
             ChannelExec channelExec = (ChannelExec) session.openChannel("exec");
-            for (int i = 0; i < nodeCount; i++) {
-                channelExec.setCommand(finalOrder);
-                channelExec.connect();
+            channelExec.setCommand("ls -l /home/dennis/env/go/bin/go && cd ~/tendermint-prov-plus-master/jmtest/jm-dir && nohup /home/dennis/env/go/bin/go run jm.go > /tmp/go_run_output.log 2>&1 &");
+            channelExec.connect();
+
+            // 捕获输出
+            InputStream inputStream = channelExec.getInputStream();
+
+            // 读取命令输出
+            BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                System.out.println(line);  // 打印每一行的输出
             }
+
+//            InputStream in = channelExec.getInputStream();
+//            byte[] buffer = new byte[1024];
+//            StringBuilder stringBuilder = new StringBuilder();
+//            int bytesRead;
+//
+//            // in.read(buffer)从输入流中读取数据，并将读取的字节存储到buffer数组
+//            while ((bytesRead = in.read(buffer)) != -1) {
+//                stringBuilder.append(new String(buffer, 0, bytesRead));
+//            }
+            System.out.println("执行JMeter over" );
             channelExec.disconnect();
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
-
 
     /**
      * 并行启动docker节点
@@ -167,6 +149,15 @@ public class userssh {
                 public void run() {
                     RemoteSession remoteSession = entry.getValue();
                     startDocker(remoteSession.session);
+                    //System.out.println("123456 "+remoteSession.absoluteRemoteRootPath+"/"+RemoteWorkSpace);
+                    Session session = remoteSession.session;
+                    session.setConfig("StrictHostKeyChecking", "no");
+                    //ChannelExec channelExec = (ChannelExec) session.openChannel("exec");
+                    try {
+                        chmodFloder(session.openChannel("exec"), remoteSession.absoluteRemoteRootPath + "/" + RemoteWorkSpace);
+                    } catch (JSchException e) {
+                        throw new RuntimeException(e);
+                    }
                     countDownLatch.countDown();
                 }
             });
@@ -174,6 +165,37 @@ public class userssh {
         }
         System.out.println("并行启动结束");
     }
+
+    private void chmodFloder(Channel exec, String remoteFilePath) {
+        try {
+            //sudo chmod -R 777 /home/dennis/dockerfiles
+            String command = "sudo chmod -R 777 " + remoteFilePath;
+            //String command= "python3 hello.py";
+            System.out.println("执行命令" + command + "的结果为：");
+            ChannelExec channelExec = (ChannelExec) exec;
+            channelExec.setCommand(command);
+            InputStream in = channelExec.getInputStream();
+            channelExec.connect();
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(in));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                System.out.println(line);
+            }
+
+//            int exitStatus = channelExec.getExitStatus();
+//            if (exitStatus == 0) {
+//                System.out.println("命令执行成功");
+//            } else {
+//                System.out.println("命令执行失败，exitStatus: " + exitStatus);
+//            }
+
+            channelExec.disconnect();
+        } catch (JSchException | IOException e) {
+            e.printStackTrace();
+        }
+    }
+
 
     /**
      * 启动docker
@@ -188,6 +210,15 @@ public class userssh {
             ChannelExec channelExec = (ChannelExec) session.openChannel("exec");
             channelExec.setCommand("docker compose up");
             channelExec.connect();
+            System.out.println("执行docker compose up");
+
+            // 等待10秒钟！！！不然docker还未启动，就断开了连接
+            try {
+                Thread.sleep(10000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+
             channelExec.disconnect();
         } catch (Exception e) {
             e.printStackTrace();
@@ -232,7 +263,7 @@ public class userssh {
                 session.setPassword(keyword);// 设置密码
 
                 // 禁用主机密钥检查 StrictHostKeyChecking
-                java.util.Properties config = new java.util.Properties();
+                Properties config = new Properties();
                 // java.util.Properties用于管理属性集合；继承于java.util.Hashtable类，具有哈希表的特性，可以存储键值对
                 config.put("StrictHostKeyChecking", "no");// 添加键值对
                 session.setConfig(config);
@@ -255,7 +286,8 @@ public class userssh {
                     stringBuilder.append(new String(buffer, 0, bytesRead));
                 }
                 String remotePath = stringBuilder.toString().trim();  // trim()去除字符串两端空格
-                map.put(user.getId(), new RemoteSession(session, remotePath + "/duan_workspace"));
+                map.put(user.getId(), new RemoteSession(session, remotePath));
+
 
                 channelExec.disconnect();
             } catch (JSchException | IOException e) {
@@ -294,9 +326,7 @@ public class userssh {
                 public void run() {
                     Integer id = entry.getKey();
                     RemoteSession remoteSession = entry.getValue();
-                    // 本地对应远端的唯一路径，通过userid来区分!!!
-                    String specialLocalPath = LocalFilePath + "/" + id;
-                    downloadFromSSH(remoteSession.session, specialLocalPath, remoteSession.absoluteSessionPath);
+                    downloadFromSSH(id, remoteSession);
                     // 每个线程下载完毕后，计数器减去1
                     countDownLatch.countDown();
                 }
@@ -321,8 +351,7 @@ public class userssh {
                 public void run() {
                     Integer id = entry.getKey();
                     RemoteSession remoteSession = entry.getValue();
-                    String specialLocalPath = LocalFilePath + "/" + id;
-                    uploadSSH(remoteSession.session, specialLocalPath, remoteSession.absoluteSessionPath);
+                    uploadSSH(id, remoteSession);
                     // 每个线程下载完毕后，计数器减去1
                     countDownLatch.countDown();
                 }
@@ -332,20 +361,52 @@ public class userssh {
     }
 
 
-    private void downloadFromSSH(Session session, String localFilePath, String remoteFilePath) {
+    private void downloadFromSSH(Integer id, RemoteSession remoteSession) {
+        Session session = remoteSession.session;
+        session.setConfig("StrictHostKeyChecking", "no");
+        Channel channel = null;
         try {
-            Channel channel = session.openChannel("sftp");
+            channel = session.openChannel("sftp");
+            //System.out.println("111111sftp");
+        } catch (JSchException e) {
+            throw new RuntimeException(e);
+        }
+        try {
+            // 本地对应远端的唯一路径，通过userid来区分
+            String specialLocalPath = LocalFilePath + "/" + id;
             channel.connect();
+            //System.out.println("在这里建立连接成功");
             ChannelSftp sftp = (ChannelSftp) channel;
 
-            File file = new File(localFilePath);
+            // 创建本地工作文件目录
+            File file = new File(specialLocalPath);
             if (!file.exists() && !file.mkdir()) {
                 throw new RuntimeException("创建本地文件夹失败！");
             }
 
-            downloadFolder(sftp, localFilePath, remoteFilePath);
+
+            downloadYML(sftp, specialLocalPath, remoteSession.absoluteRemoteRootPath);
+
+            downloadFolder(sftp, specialLocalPath, remoteSession.absoluteRemoteWorkPath);
         } catch (Throwable t) {
             t.printStackTrace();
+        } finally {
+            // 在finally块中确保关闭通道
+            if (channel != null && channel.isConnected()) {
+                channel.disconnect();
+            }
+        }
+    }
+
+    private void downloadYML(ChannelSftp sftp, String localFilePath, String remoteFilePath) {
+        try {
+            String ymlName = "docker-compose.yml";
+            String finalLocalpath = localFilePath + "/" + ymlName;
+            String finalremotepath = remoteFilePath + "/" + ymlName;
+            //System.out.println("1111111111" + finalremotepath);
+            sftp.get(finalremotepath, finalLocalpath);
+        } catch (Exception e) {
+
         }
     }
 
@@ -362,13 +423,17 @@ public class userssh {
                         File localFolder = new File(localRealPath);
                         localFolder.mkdir();
                         downloadFolder(channelSftp, localRealPath, remoteRealPath);
+                        //System.out.println("000000000"+remoteRealPath);
                     } else {
                         System.out.println("跳过对 . 和 ..文件路径的处理！");
                     }
                 } else {
                     // 文件！
                     // SFTP（SSH File Transfer Protocol）的get方法从远端服务器路径下拉取文件到本地路径
+                    //System.out.println(remoteRealPath);
+                    //System.out.println(localRealPath);
                     channelSftp.get(remoteRealPath, localRealPath);
+                    System.out.println("拉取成功");
                 }
             }
         } catch (Throwable e) {
@@ -376,7 +441,66 @@ public class userssh {
         }
     }
 
-    private boolean configUnify(Map<Integer, RemoteSession> map) {
+    private void configUnify(Map<Integer, RemoteSession> map) {
+        unifyTNodeInfo(map);
+        unifyJson(map);
+    }
+
+    //整合tendermint节点信息
+    private void unifyTNodeInfo(Map<Integer, RemoteSession> map) {
+        try {
+            // 1.session id
+            // 2.container name
+            //3. node info
+            System.out.println("map:" + map);
+            for (Map.Entry<Integer, RemoteSession> entry : map.entrySet()) {
+                int session_id = entry.getKey();
+                tendermintMap.put(session_id, new HashMap<>());
+
+
+                String nodeRootPath = LocalFilePath + "/" + session_id;
+                String localYMLPath = nodeRootPath + "/docker-compose.yml";
+                InputStream inputStream = new FileInputStream(localYMLPath);
+                Yaml yaml = new Yaml();
+                Map<String, Map<String, Object>> data = yaml.load(inputStream);
+
+                // 提取节点信息
+                for (Map.Entry<String, Object> ymlEntry : data.get("services").entrySet()) {
+                    Map<String, Object> serviceData = (Map<String, Object>) ymlEntry.getValue();
+                    String container_name = (String) serviceData.get("container_name");
+                    String node_ip = (String) ((Map<String, Object>) ((Map<String, Object>) serviceData.get("networks")).get("dennis_mynet")).get("ipv4_address");
+
+                    List<String> ports = (List<String>) serviceData.get("ports");
+                    String node_port = "";
+                    for (String port : ports) {
+                        String[] portParts = port.split(":");
+                        String frontPort = portParts[0];
+                        String endPort = portParts[1];
+                        if ("26656".equals(endPort)) {
+                            node_port = frontPort;
+                        }
+                    }
+                    String node_id = "";
+                    String nodeIDPath = nodeRootPath + "/" + container_name + "/nodeid.txt";
+                    BufferedReader br = new BufferedReader(new FileReader(nodeIDPath));
+                    node_id = br.readLine();
+
+
+                    TNodeInfo tNodeInfo = new TNodeInfo(container_name, node_id, node_ip, node_port);
+                    tendermintMap.get(session_id).put(container_name, tNodeInfo);
+
+                }
+            }
+
+            System.out.println(tendermintMap);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    //整合创世区块json文件
+    private boolean unifyJson(Map<Integer, RemoteSession> map) {
         System.out.println("整合开始");
         File outputfile = new File(LocalFilePath + "/genesis_temp.json");
         try {
@@ -456,15 +580,31 @@ public class userssh {
         }
     }
 
-    private void uploadSSH(Session session, String localFilePath, String remoteFilePath) {
+    private void uploadSSH(Integer id, RemoteSession remoteSession) {
+        Session session = remoteSession.session;
+        Channel channel = null;
         try {
-            Channel channel = session.openChannel("sftp");
+            channel = session.openChannel("sftp");
+            //System.out.println("222222sftp");
+        } catch (JSchException e) {
+            throw new RuntimeException(e);
+        }
+        try {
+            //System.out.println("~~~~~~~" + LocalFilePath + "/" + id);
+            //System.out.println("~~~~~~~" + remoteSession.absoluteRemoteWorkPath);
             channel.connect();
             ChannelSftp sftp = (ChannelSftp) channel;
 
-            uploadFolder(sftp, localFilePath, remoteFilePath);
+            String specialLocalPath = LocalFilePath + "/" + id;
+            uploadFolder(sftp, specialLocalPath, remoteSession.absoluteRemoteWorkPath);
         } catch (Throwable t) {
             t.printStackTrace();
+
+        } finally {
+            // 在 finally 块中确保关闭通道
+            if (channel != null && channel.isConnected()) {
+                channel.disconnect();
+            }
         }
     }
 
@@ -489,6 +629,131 @@ public class userssh {
             System.out.println("上传失败");
         }
 
+    }
+
+    /**
+     * docker节点启动tendermint，部署集群
+     *
+     * @param countDownLatch
+     */
+    private void concurrentTendermintForSession(Map<Integer, RemoteSession> userSessionMap, CountDownLatch countDownLatch) {
+        if (userSessionMap == null || userSessionMap.isEmpty()) {
+            return;
+        }
+        String tendermintOrder = generateNodeInfoString(tendermintMap);
+        System.out.println("开始启动tendermint集群");
+        ThreadPoolExecutor startDockerThreadPoolExecutor = generateThreadPoolExecutor();
+
+        for (Map.Entry<Integer, RemoteSession> entry : userSessionMap.entrySet()) {
+            if (entry == null) {
+                continue;
+            }
+            startDockerThreadPoolExecutor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    //RemoteSession remoteSession = entry.getValue();
+                    startTendermint(entry, tendermintOrder, tendermintMap);
+                    countDownLatch.countDown();
+                }
+            });
+
+        }
+        System.out.println("启动tendermint集群结束");
+    }
+
+    //整合启动tendermint的tendermintOrder
+    private String generateNodeInfoString(Map<Integer, Map<String, TNodeInfo>> tendermintMap) {
+        StringBuilder stringBuilder = new StringBuilder();
+
+        for (Map<String, TNodeInfo> sessionMap : tendermintMap.values()) {
+            for (TNodeInfo tNodeInfo : sessionMap.values()) {
+                String nodeInfoString = String.format("%s@%s:%s", tNodeInfo.getNodeId(), tNodeInfo.getNodeIp(), tNodeInfo.getNodePort());
+                stringBuilder.append(nodeInfoString).append(",");
+            }
+        }
+
+        // 删除末尾多余的逗号
+        if (stringBuilder.length() > 0) {
+            stringBuilder.deleteCharAt(stringBuilder.length() - 1);
+        }
+
+        return stringBuilder.toString();
+    }
+
+    /**
+     * 启动tendermint
+     */
+    private void startTendermint(Map.Entry<Integer, RemoteSession> userSession, String tendermintOrder, Map<Integer, Map<String, TNodeInfo>> tendermintMap) {
+        int sessionId = userSession.getKey();
+        //String startOrder = "nohup ./tendermint node --p2p.persistent_peers=\"" + tendermintOrder + "\" > /dev/null 2>&1 &";
+        String startOrder = "nohup ./tendermint node --p2p.persistent_peers=\"" + tendermintOrder + "\" --proxy_app=kvstore &";
+        Map<String, TNodeInfo> sessionNodes = tendermintMap.get(sessionId);
+
+        if (sessionNodes != null) {
+            StringBuilder scriptContent = new StringBuilder("#!/bin/bash\n");
+            for (Map.Entry<String, TNodeInfo> nodeEntry : sessionNodes.entrySet()) {
+                String containerName = nodeEntry.getValue().containerName;
+                String finalOrder = "docker exec -d " + containerName + " " + startOrder;
+                scriptContent.append(finalOrder).append("\n");
+            }
+
+            try {
+                // 保存脚本内容到本地文件
+                String LocalShPath = LocalFilePath + "/start.sh";
+                generateAndwriteSh(LocalShPath, scriptContent);
+
+                //上传脚本到远端服务器
+                ChannelSftp sftpChannel = null;
+                try {
+                    Channel channel = userSession.getValue().session.openChannel("sftp");
+                    channel.connect();
+                    sftpChannel = (ChannelSftp) channel;
+                } catch (JSchException e) {
+                    e.printStackTrace();
+                }
+                String RemoteShPath = userSession.getValue().absoluteRemoteRootPath + "/start.sh";
+                uploadSh(LocalShPath, RemoteShPath, sftpChannel);
+
+                // 在远程服务器上添加可执行权限后立即执行
+                String executeScriptCommand = "chmod +x " + RemoteShPath + " && " + RemoteShPath;
+                ChannelExec channelExec = (ChannelExec) userSession.getValue().session.openChannel("exec");
+                channelExec.setCommand(executeScriptCommand);
+
+                // 获取命令的输出流
+                InputStream in = channelExec.getInputStream();
+                // 执行命令
+                channelExec.connect();
+                // 读取输出流中的内容
+                BufferedReader reader = new BufferedReader(new InputStreamReader(in));
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    System.out.println(line);
+                }
+                // 关闭连接
+                channelExec.disconnect();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        } else {
+            System.out.println("No nodes found for session ID: " + sessionId);
+        }
+    }
+
+    private void generateAndwriteSh(String localFilePath, StringBuilder scriptContent) {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(localFilePath))) {
+            writer.write(scriptContent.toString());
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void uploadSh(String localFilePath, String remoteFilePath, ChannelSftp sftpChannel) {
+        try {
+            sftpChannel.put(localFilePath, remoteFilePath);
+            sftpChannel.disconnect(); // 关闭SFTP通道
+        } catch (SftpException e) {
+            e.printStackTrace();
+        }
     }
 
 }
